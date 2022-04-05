@@ -3,8 +3,7 @@ local M = {}
 
 --- Extends dap.configurations with entries read from .vscode/launch.json
 function M.load_launchjs(path, type_to_filetypes)
-  type_to_filetypes = type_to_filetypes or {}
-  local resolved_path = path or (vim.fn.getcwd() .. '/.vscode/launch.json')
+  type_to_filetypes = type_to_filetypes or {} local resolved_path = path or (vim.fn.getcwd() .. '/.vscode/launch.json')
   if not vim.loop.fs_stat(resolved_path) then
     return
   end
@@ -28,6 +27,13 @@ function M.load_launchjs(path, type_to_filetypes)
     for _, filetype in pairs(filetypes) do
       local configurations = dap.configurations[filetype] or {}
       dap.configurations[filetype] = configurations
+         -- check whether configurations contains the config by name, if so,update it
+      for i,value in ipairs(configurations) do
+        if value["name"] == config["name"] then
+          table.remove(configurations, i)
+          break
+        end
+      end
       table.insert(configurations, config)
     end
   end
