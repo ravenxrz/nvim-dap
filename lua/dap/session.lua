@@ -807,7 +807,7 @@ function Session:spawn(adapter, opts)
     stdio = {stdin, stdout, stderr};
     cwd = options.cwd;
     env = options.env;
-    detached = true;
+    detached = utils.if_nil(options.detached, true);
   }
   handle, pid_or_err = uv.spawn(adapter.command, spawn_opts, onexit)
   if not handle then
@@ -1100,6 +1100,10 @@ function Session.event_module()
 end
 
 function Session.event_process()
+end
+
+
+function Session.event_loadedSource()
 end
 
 
