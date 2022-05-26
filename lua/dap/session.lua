@@ -14,11 +14,97 @@ local mime_to_filetype = {
   ['text/javascript'] = 'javascript'
 }
 
+---@class Session
+---@field capabilities Capabilities
+---@field adapter Adapter
+---@field dirty table<string, boolean>
+---@field handlers table<string, fun(self: Session, payload: table)|fun()>
+---@field client Client
+---@field current_frame StackFrame|nil
+---@field initialized boolean
+---@field stopped_thread_id number|nil
+
+
+---@class StackFrame
+---@field id number
+---@field source Source|nil
+
+---@class Source
+
+---@class Client
+---@field close function
+---@field write function
+
+---@class Capabilities
+---@field supportsConfigurationDoneRequest boolean|nil
+---@field supportsFunctionBreakpoints boolean|nil
+---@field supportsConditionalBreakpoints boolean|nil
+---@field supportsHitConditionalBreakpoints boolean|nil
+---@field supportsEvaluateForHovers boolean|nil
+---@field exceptionBreakpointFilters ExceptionBreakpointsFilter[]|nil
+---@field supportsStepBack boolean|nil
+---@field supportsSetVariable boolean|nil
+---@field supportsRestartFrame boolean|nil
+---@field supportsGotoTargetsRequest boolean|nil
+---@field supportsStepInTargetsRequest boolean|nil
+---@field supportsCompletionsRequest boolean|nil
+---@field completionTriggerCharacters string[]|nil
+---@field supportsModulesRequest boolean|nil
+---@field additionalModuleColumns ColumnDescriptor[]|nil
+---@field supportedChecksumAlgorithms ChecksumAlgorithm[]|nil
+---@field supportsRestartRequest boolean|nil
+---@field supportsExceptionOptions boolean|nil
+---@field supportsValueFormattingOptions boolean|nil
+---@field supportsExceptionInfoRequest boolean|nil
+---@field supportTerminateDebuggee boolean|nil
+---@field supportSuspendDebuggee boolean|nil
+---@field supportsDelayedStackTraceLoading boolean|nil
+---@field supportsLoadedSourcesRequest boolean|nil
+---@field supportsLogPoints boolean|nil
+---@field supportsTerminateThreadsRequest boolean|nil
+---@field supportsSetExpression boolean|nil
+---@field supportsTerminateRequest boolean|nil
+---@field supportsDataBreakpoints boolean|nil
+---@field supportsReadMemoryRequest boolean|nil
+---@field supportsWriteMemoryRequest boolean|nil
+---@field supportsDisassembleRequest boolean|nil
+---@field supportsCancelRequest boolean|nil
+---@field supportsBreakpointLocationsRequest boolean|nil
+---@field supportsClipboardContext boolean|nil
+---@field supportsSteppingGranularity boolean|nil
+---@field supportsInstructionBreakpoints boolean|nil
+---@field supportsExceptionFilterOptions boolean|nil
+---@field supportsSingleThreadExecutionRequests boolean|nil
+
+
+---@class ExceptionBreakpointsFilter
+---@field filter string
+---@field label string
+---@field description string|nil
+---@field default boolean|nil
+---@field supportsCondition boolean|nil
+---@field conditionDescription string|nil
+
+---@class ColumnDescriptor
+---@field attributeName string
+---@field label string
+---@field format string|nil
+---@field type nil|"string"|"number"|"number"|"unixTimestampUTC"
+---@field width number|nil
+
+
+---@class ChecksumAlgorithm
+---@field algorithm "MD5"|"SHA1"|"SHA256"|"timestamp"
+---@field checksum string
+
+---@class Session
 local Session = {}
+
 local ns_pos = 'dap_pos'
-local terminal_buf
+local terminal_buf, terminal_width, terminal_height
 
 local NIL = vim.NIL
+
 local function convert_nil(v)
   if v == NIL then
     return nil
@@ -28,6 +114,7 @@ local function convert_nil(v)
     return v
   end
 end
+
 local json_decode
 local json_encode = vim.fn.json_encode
 local send_payload
@@ -42,7 +129,7 @@ if vim.json then
   end
 else
   json_decode = function(payload)
-    return convert_nil(vim.fn.json_decode(payload))
+    return assert(convert_nil(vim.fn.json_decode(payload)), "json_decode must return a value")
   end
   send_payload = function(client, payload)
     vim.schedule(function()
@@ -98,6 +185,21 @@ local function launch_external_terminal(terminal, args)
 end
 
 
+local function create_terminal_buf(terminal_win_cmd)
+  local cur_win = api.nvim_get_current_win()
+  if type(terminal_win_cmd) == "string" then
+    api.nvim_command(terminal_win_cmd)
+    local bufnr = api.nvim_get_current_buf()
+    local win = api.nvim_get_current_win()
+    api.nvim_set_current_win(cur_win)
+    return bufnr, win
+  else
+    assert(type(terminal_win_cmd) == "function", "terminal_win_cmd must be a string or a function")
+    return terminal_win_cmd()
+  end
+end
+
+
 local function run_in_terminal(self, request)
   local body = request.arguments
   log.debug('run_in_terminal', body)
@@ -118,38 +220,54 @@ local function run_in_terminal(self, request)
       return
     end
   end
-  local cur_win = api.nvim_get_current_win()
   local cur_buf = api.nvim_get_current_buf()
   if terminal_buf and api.nvim_buf_is_valid(terminal_buf) then
-    local terminal_buf_win = false
     api.nvim_buf_set_option(terminal_buf, 'modified', false)
-    for _, win in pairs(api.nvim_tabpage_list_wins(0)) do
-      if api.nvim_win_get_buf(win) == terminal_buf then
-        terminal_buf_win = true
-        api.nvim_set_current_win(win)
-      end
-    end
-    if not terminal_buf_win then
-      api.nvim_buf_delete(terminal_buf, {force=true})
-      api.nvim_command(dap().defaults[self.config.type].terminal_win_cmd)
-      terminal_buf = api.nvim_get_current_buf()
-    end
   else
-    api.nvim_command(dap().defaults[self.config.type].terminal_win_cmd)
-    terminal_buf = api.nvim_get_current_buf()
+    local terminal_win
+    terminal_buf, terminal_win = create_terminal_buf(settings.terminal_win_cmd)
+    if terminal_win then
+      vim.wo[terminal_win].number = false
+      vim.wo[terminal_win].relativenumber = false
+      vim.wo[terminal_win].signcolumn = "no"
+    end
+    terminal_width = terminal_win and api.nvim_win_get_width(terminal_win) or 80
+    terminal_height = terminal_win and api.nvim_win_get_height(terminal_win) or 40
+    api.nvim_buf_set_name(terminal_buf, '[dap-terminal] ' .. self.config.name or body.args[1])
   end
   local ok, path = pcall(api.nvim_buf_get_option, cur_buf, 'path')
   if ok then
     api.nvim_buf_set_option(terminal_buf, 'path', path)
   end
+  local jobid
+
+  local chan = api.nvim_open_term(terminal_buf, {
+    on_input = function(_, _, _, data)
+      pcall(api.nvim_chan_send, jobid, data)
+    end,
+  })
   local opts = {
-    clear_env = false;
     env = next(body.env or {}) and body.env or vim.empty_dict(),
-    cwd = (body.cwd and body.cwd ~= '') and body.cwd or nil
+    cwd = (body.cwd and body.cwd ~= '') and body.cwd or nil,
+    height = terminal_height,
+    width = terminal_width,
+    pty = true,
+    on_stdout = function(_, data)
+      api.nvim_chan_send(chan, table.concat(data, "\n"))
+    end,
+    on_exit = function(_, exit_code)
+      api.nvim_chan_send(chan, '\r\n[Process exited ' .. tostring(exit_code) .. ']')
+      api.nvim_buf_set_keymap(terminal_buf, "t", "<CR>", "<cmd>bd!<CR>", { noremap = true, silent = true})
+    end,
   }
-  local jobid = vim.fn.termopen(body.args, opts)
-  if not dap().defaults[self.config.type].focus_terminal then
-      api.nvim_set_current_win(cur_win)
+  jobid = vim.fn.jobstart(body.args, opts)
+  if settings.focus_terminal then
+    for _, win in pairs(api.nvim_tabpage_list_wins(0)) do
+      if api.nvim_win_get_buf(win) == terminal_buf then
+        api.nvim_set_current_win(win)
+        break
+      end
+    end
   end
   if jobid == 0 or jobid == -1 then
     log.error('Could not spawn terminal', jobid, request)
@@ -182,7 +300,8 @@ function Session:event_initialized()
     end
   end
 
-  self:set_breakpoints(nil, function()
+  local bps = breakpoints.get()
+  self:set_breakpoints(bps, function()
     if self.capabilities.exceptionBreakpointFilters then
       self:set_exception_breakpoints(dap().defaults[self.config.type].exception_breakpoints, nil, on_done)
     else
@@ -226,7 +345,7 @@ local function with_win(win, fn, ...)
   local cur_win = api.nvim_get_current_win()
   api.nvim_set_current_win(win)
   local ok, err = pcall(fn, ...)
-  api.nvim_set_current_win(cur_win)
+  pcall(api.nvim_set_current_win, cur_win)
   assert(ok, err)
 end
 
@@ -246,7 +365,7 @@ local function jump_to_location(bufnr, line, column)
   for _, win in pairs(api.nvim_tabpage_list_wins(0)) do
     if api.nvim_win_get_buf(win) == bufnr then
       api.nvim_win_set_cursor(win, { line, column - 1 })
-      with_win(win, api.nvim_command, 'normal zv')
+      with_win(win, api.nvim_command, 'normal! zv')
       return
     end
   end
@@ -259,7 +378,7 @@ local function jump_to_location(bufnr, line, column)
       local bufchanged, _ = pcall(api.nvim_win_set_buf, win, bufnr)
       if bufchanged then
         api.nvim_win_set_cursor(win, { line, column - 1 })
-        with_win(win, api.nvim_command, 'normal zv')
+        with_win(win, api.nvim_command, 'normal! zv')
         return
       end
     end
@@ -356,7 +475,8 @@ local function get_top_frame(frames)
       return frame
     end
   end
-  return next(frames)
+  local _, first = next(frames)
+  return first
 end
 
 
@@ -372,7 +492,7 @@ function Session:event_stopped(stopped)
     return
   end
 
-  local should_jump = stopped.reason ~= 'pause'
+  local should_jump = stopped.reason ~= 'pause' or stopped.allThreadsStopped
   if self.stopped_thread_id and should_jump then
     local thread = self.threads[self.stopped_thread_id]
     if defaults(self).auto_continue_if_many_stopped then
@@ -519,8 +639,9 @@ do
     end
   end
 
-  function Session:set_breakpoints(bufexpr, on_done)
-    local bps = breakpoints.get(bufexpr)
+  local detach_handlers = {}
+
+  function Session:set_breakpoints(bps, on_done)
     local num_requests = vim.tbl_count(bps)
     if num_requests == 0 then
       if on_done then
@@ -530,6 +651,15 @@ do
     end
     for bufnr, buf_bps in pairs(bps) do
       notify_if_missing_capability(buf_bps, self.capabilities)
+      local on_detach = detach_handlers[bufnr]
+      if not on_detach and non_empty(buf_bps) then
+        on_detach = function()
+          self:set_breakpoints({[bufnr] = {}})
+          detach_handlers[bufnr] = nil
+        end
+        detach_handlers[bufnr] = on_detach
+        api.nvim_buf_attach(bufnr, false, { on_detach = on_detach })
+      end
       local path = api.nvim_buf_get_name(bufnr)
       local payload = {
         source = {
@@ -537,7 +667,19 @@ do
           name = vim.fn.fnamemodify(path, ':t')
         };
         sourceModified = false;
-        breakpoints = buf_bps;
+        breakpoints = vim.tbl_map(
+          function(bp)
+            -- trim extra information like the state
+            return {
+              line = bp.line,
+              column = bp.column,
+              condition = bp.condition,
+              hitCondition = bp.hitCondition,
+              logMessage = bp.logMessage,
+            }
+          end,
+          buf_bps
+        ),
         lines = vim.tbl_map(function(x) return x.line end, buf_bps);
       }
       self:request('setBreakpoints', payload, function(err1, resp)
@@ -682,7 +824,8 @@ local default_reverse_request_handlers = {
 }
 
 
-local function session_defaults(adapter, opts)
+---@return Session
+local function new_session(adapter, opts)
   local handlers = {}
   handlers.after = opts.after
   handlers.reverse_requests = vim.tbl_extend(
@@ -690,7 +833,7 @@ local function session_defaults(adapter, opts)
     default_reverse_request_handlers,
     adapter.reverse_request_handlers or {}
   )
-  return {
+  local state = {
     handlers = handlers;
     message_callbacks = {};
     message_requests = {};
@@ -702,14 +845,13 @@ local function session_defaults(adapter, opts)
     adapter = adapter;
     dirty = {};
   }
+  return setmetatable(state, { __index = Session })
 end
 
 
-function Session:connect(adapter, opts, on_connect)
+function Session.connect(_, adapter, opts, on_connect)
   log.debug('Connecting to debug adapter', adapter)
-  local session = session_defaults(adapter, opts or {})
-  setmetatable(session, self)
-  self.__index = self
+  local session = new_session(adapter, opts or {})
 
   local closed = false
   local client = uv.new_tcp()
@@ -772,11 +914,12 @@ function Session:connect(adapter, opts, on_connect)
 end
 
 
-function Session:spawn(adapter, opts)
+---@param adapter ExecutableAdapter
+---@param opts table|nil
+---@return Session
+function Session.spawn(_, adapter, opts)
   log.debug('Spawning debug adapter', adapter)
-  local session = session_defaults(adapter, opts or {})
-  setmetatable(session, self)
-  self.__index = self
+  local session = new_session(adapter, opts or {})
 
   local stdin = uv.new_pipe(false)
   local stdout = uv.new_pipe(false)
@@ -882,6 +1025,8 @@ function Session:_pause(thread_id, cb)
 end
 
 
+---@param step "next"|"stepIn"|"stepOut"|"stepBack"|"continue"|"reverseContinue"
+---@param params table|nil
 function Session:_step(step, params)
   if not self.stopped_thread_id then
     utils.notify('No stopped thread. Cannot move', vim.log.levels.ERROR)
@@ -984,6 +1129,8 @@ function Session:response(request, payload)
 end
 
 
+--- Initialize the debug session
+---@param config Configuration
 function Session:initialize(config)
   vim.schedule(repl.clear)
   local adapter_responded = false
